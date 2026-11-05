@@ -1,0 +1,534 @@
+#include "stm32f303xc.h"
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#define SLAVE_ADDRESS 	0x28
+
+void i2c_enable(void);
+void i2c_disable(void);
+void i2c_enable_clock_stretch(void);
+void i2c_disable_clock_stretch(void);
+void i2c_set_own_address(uint8_t own_address);
+void i2c_set_10bit_addressing_mode(void);
+void i2c_set_7bit_addressing_mode(void);
+void i2c_generate_start(void);
+void i2c_generate_stop(void);
+void is_bus_busy(void);
+void i2c_wait_until_addr_set(void);
+void i2c_gpio_init(void);
+void i2c_init(void);
+void i2c1_write(uint8_t slave_addr, uint8_t reg,unsigned char* data, uint8_t len);
+void i2c_scan_slave(void);
+void gpio_led_init(void);
+void bno055_power_management(unsigned char mode);
+void bno055_operation_management(unsigned char mode);
+void bno055_read_single_byte(uint8_t address,unsigned char* data1);
+void bno055_read_multiple_bytes(uint8_t address,unsigned char* data1, uint8_t len);
+void bno055_write_single_byte(uint8_t address,unsigned char data);
+void bno055_init(void);
+void bno055_set_page_id(unsigned char page);
+void bno055_sys_trigger(unsigned char test);
+void i2c1_read(uint8_t slave_addr, uint8_t reg,unsigned char* data1,uint8_t len);
+void uart_SendString(unsigned char *string);
+void uart_SendChar(unsigned char c);
+void uart_init(void);
+void bno055_check_calibration(unsigned char* data1);
+void bno055_get_raw_gyro(void);
+void bno055_get_raw_acc(void);
+void bno055_get_raw_mag(void);
+void delay_ms(uint32_t ms);
+int pid(double current_pitch, double kp, double ki, double kd);
+double get_pitch(void);
+int constrain(int val, int min, int max);
+void tim2_init_us(void);
+uint32_t get_current_time_us(void);
+	
+void uart_init(void)
+{
+	/* 1. Enable the UART CLOCK and GPIO CLOCK */
+	RCC->AHBENR |= RCC_AHBENR_GPIOAEN; /* Enable GPIOA CLOCK */
+	RCC->APB1ENR |= RCC_APB1ENR_USART2EN;  /* Enable UART2 CLOCK */
+	
+	/* 2. Configure the UART PINs for ALternate Functions */
+	GPIOA->MODER &= ~(3U << (2 * 2));   // Clear mode bits
+	GPIOA->MODER |= (2U << (2 * 2));  /* Bits (5:4)= 1:0 --> Alternate Function for Pin PA2 */
+	//GPIOA->MODER |= (2<<6);  /* Bits (7:6)= 1:0 --> Alternate Function for Pin PA3 */
+	
+	GPIOA->AFR[0] |= (7U << (4 * 2));  /* Bytes (11:10:9:8) = 0:1:1:1  --> AF7 Alternate function for USART2 at Pin PA2 */
+	//GPIOA->AFR[0] |= (7<<12); /* Bytes (15:14:13:12) = 0:1:1:1  --> AF7 Alternate function for USART2 at Pin PA3 */
+	
+	/* 3. Configure the Output Speed Register */
+	//GPIOA->OSPEEDR |= (3<<4) | (3<<6);  /* Bits (5:4)= 1:1 and Bits (7:6)= 1:1 --> High Speed for PIN PA2 and PA3 */
+	
+	//USART2->CR1 &= ~USART_CR1_UE;  /* Disable USART before configuration */
+	
+	/* 4. Program the M bit in USART_CR1 to define the word length. */
+	//USART2->CR1 &= ~(1 << 28);     /* M1 = 0 */
+	//USART2->CR1 &= ~(1 << 12);     /* M0 = 0 (8-bit word length) */
+	
+	/* 5. Select the desired baud rate using the USART_BRR register. */
+	USART2->BRR = 8000000 / 9600; /* Assuming 8MHz PCLK1, set Baud Rate to 9600 */
+	
+	/* 6. Program the number of stop bits in USART_CR2. */
+	//USART2->CR2 &= ~(3 << 12);     /* STOP[13:12] = 00 (1 stop bit) */
+	
+	USART2->CR1 |= USART_CR1_TE;   /* Enable USART */
+
+	/* 7. Enable the Transmitter by Setting the TE bit in USART_CR1 Register */
+	USART2->CR1 |= USART_CR1_UE;  /* TE=1.. Enable Transmitter */
+	
+	while (!(USART2->ISR & USART_ISR_TEACK)); /* Wait until USART2 is ready. */
+	
+}
+
+void uart_SendChar(unsigned char c)
+{
+	while (!(USART2->ISR & USART_ISR_TXE));/* Wait for TC to SET.. This indicates that the data has been transmitted */
+	USART2->TDR = c; /* load the data into TDR register */
+}
+	
+void uart_SendString(unsigned char *string)
+{
+	while (*string) uart_SendChar (*string++);
+}
+
+void i2c_enable_clock_stretch(void)
+{
+	I2C1->CR1 &= I2C_CR1_NOSTRETCH;
+}
+
+void i2c_disable_clock_stretch(void)
+{
+	I2C1->CR1 |= I2C_CR1_NOSTRETCH;
+}
+
+void i2c_enable(void)
+{
+	I2C1->CR1 |= I2C_CR1_PE;
+}
+
+void i2c_disable(void)
+{
+	I2C1->CR1 &= I2C_CR1_PE;
+}
+
+void i2c_set_own_address(uint8_t own_address)
+{
+	I2C1->OAR1 &= ~I2C_OAR1_OA1EN;
+	I2C1->OAR1 &= ~(0x7f << 1);
+	I2C1->OAR1 |= (own_address << 1);
+	I2C1->OAR1 |= I2C_OAR1_OA1EN;
+}
+
+void i2c_set_10bit_addressing_mode(void)
+{
+	I2C1->OAR1 |= I2C_OAR1_OA1MODE;
+}
+
+void i2c_set_7bit_addressing_mode(void)
+{
+	I2C1->OAR1 &= ~I2C_OAR1_OA1MODE;
+}
+
+void i2c_generate_start(void)
+{
+	I2C1->CR2 |= I2C_CR2_START;
+}
+
+void i2c_generate_stop(void)
+{
+	I2C1->CR2 |= I2C_CR2_STOP;
+}
+
+void is_bus_busy(void)
+{
+	while(I2C1->ISR & I2C_ISR_BUSY);
+}
+
+void i2c_wait_until_addr_set(void)
+{
+	while(!(I2C1->ISR & I2C_ISR_ADDR));
+}
+
+void delay(void)
+{
+	for(int i=0;i<100000;i++);
+}
+
+void i2c_gpio_init(void)
+{
+	RCC->AHBENR |= RCC_AHBENR_GPIOBEN;
+	GPIOB->MODER &= ~((3U << (2 * 6))|(3U << (2 * 7)));   /* Clear mode bits for PB6 and PB7 */
+	GPIOB->MODER |= ((2U << (2 * 6))|(2U << (2 * 7)));  /* Alternate Function for Pin PB6 and PB7 */
+	GPIOB->OTYPER |= (1<<6) | (1<<7); /* Set type to open drain for I2C1 */
+	GPIOB->OSPEEDR |= (3U << (2 * 6))|(3U << (2 * 7)); /* Set speed to high(11) */
+	GPIOB->PUPDR &= ~((0x3 << (6 * 2)) | (0x3 << (7*2)));
+	GPIOB->PUPDR |=  (0x1 << (6 * 2)) | (0x1 << (7 * 2)); /* Set pull up mode */
+	GPIOB->AFR[0]  &= ~((0xF << (4 * 6)) | (0xF << (4 * 7))); /* Clear AFR bits */
+	GPIOB->AFR[0]  |=  ((4U << (4 * 6)) | (4U << (4 * 7)));  /* AF4 To convert GPIO functionality to I2C1 */
+}
+
+void gpio_led_init(void)
+{
+	GPIOB->MODER &= ~GPIO_MODER_MODER3;
+	GPIOB->MODER |= (1<<GPIO_MODER_MODER3_Pos);
+	GPIOB->OTYPER &= ~GPIO_OTYPER_OT_3;
+}
+
+void i2c_init(void)
+{
+	RCC->APB1ENR |= RCC_APB1ENR_I2C1EN; /* Enable clock for I2C1 */
+	I2C1->CR1 &= ~I2C_CR1_PE; /* Diasble I2C Peripheral */
+	//i2c_set_7bit_addressing_mode();
+	I2C1->TIMINGR |= 0x00201D2B;  //Standard-Mode, 100kHz Freq
+	//I2C1->TIMINGR |= 0x0010020A;  //Fast-Mode, 400kHz Freq
+	//I2C1->TIMINGR |= 0x00100002;  //Fast-Mode-Plus, 1000kHz Freq
+	//i2c_enable_clock_stretch();
+	//i2c_set_own_address(SLAVE_ADDRESS);
+	I2C1->CR1 |= I2C_CR1_PE; /* Enable I2C Peripheral */
+}
+
+void i2c1_write(uint8_t slave_addr, uint8_t reg,unsigned char* data, uint8_t len) {
+	//for(int i=0;i<1000000;i++){}
+    is_bus_busy();
+	
+		// Set up transfer: 2 bytes (reg + data), write mode
+		I2C1->CR2 = (slave_addr << 1) |    
+								((1+len) << 16) |        // NBYTES = 2
+								I2C_CR2_AUTOEND |   // Automatically send STOP after NBYTES
+								I2C_CR2_START   ;
+			
+    // Send register address
+    while (!(I2C1->ISR & I2C_ISR_TXIS));
+    I2C1->TXDR = reg;
+		
+		for(uint8_t i=0;i<len;i++)
+		{
+    // Send data
+    while (!(I2C1->ISR & I2C_ISR_TXIS));
+    I2C1->TXDR = data[i];
+		}
+		GPIOB->ODR |= GPIO_ODR_3;
+    // Wait for STOP flag
+    while (!(I2C1->ISR & I2C_ISR_STOPF));
+			
+    // Clear STOP flag
+    I2C1->ICR |= I2C_ICR_STOPCF;
+}
+
+void i2c1_read(uint8_t slave_addr, uint8_t reg,unsigned char* data1,uint8_t len) {
+	//for(int i=0;i<1000000;i++){}
+    is_bus_busy();
+	
+		// Set up transfer: 2 bytes (reg + data), write mode
+		I2C1->CR2 = (slave_addr << 1) |
+								(1 << 16) |        // NBYTES = 2
+								//I2C_CR2_AUTOEND |   // Automatically send STOP after NBYTES
+								//I2C_CR2_RD_WRN |	
+								I2C_CR2_START   ;
+			
+    // Send register address
+    while (!(I2C1->ISR & I2C_ISR_TXIS));
+    I2C1->TXDR = reg;           // Send register address    
+                                                               
+    //while (!(I2C1->ISR & I2C_ISR_TC));
+                                                                                                                                                                                                                                                                                                                                                    I2C1->TXDR = reg;
+		I2C1->CR2 = (slave_addr << 1) |
+                (len << 16) |             // NBYTES = len
+                I2C_CR2_RD_WRN |          // Read mode
+                I2C_CR2_AUTOEND |         // Auto STOP after NBYTES
+                I2C_CR2_START;
+		
+		for(uint8_t i=0;i<len;i++)
+		{
+    // Send data
+    while (!(I2C1->ISR & I2C_ISR_RXNE));
+    data1[i] =  I2C1->RXDR;
+		}
+		GPIOB->ODR |= GPIO_ODR_3;
+		
+		//while(!(I2C1->ISR & I2C_ISR_TC));
+		
+		I2C1->CR2 |= (1<<14);
+
+    // Wait for STOP flag
+    while (!(I2C1->ISR & I2C_ISR_STOPF));
+			
+    // Clear STOP flag
+    I2C1->ICR |= I2C_ICR_STOPCF;
+}
+
+void i2c_scan_slave(void)
+{
+	delay();
+	for(uint8_t addr = 0x08; addr<=0x77;addr++)
+	{
+		is_bus_busy();
+		I2C1->CR2 = (0x52) |    
+								(1 << 16) |        // NBYTES = 1
+								I2C_CR2_AUTOEND |   // Automatically send STOP after NBYTES
+								I2C_CR2_START   ;
+		
+		while(!(I2C1->ISR & (I2C_ISR_STOPF | I2C_ISR_NACKF)));
+		
+		if(I2C1->ISR & I2C_ISR_NACKF) {
+			I2C1->ICR |= I2C_ICR_NACKCF;
+			GPIOB->ODR &= ~GPIO_ODR_3; 
+		}
+		else {
+			GPIOB->ODR |= GPIO_ODR_3;
+			break;
+		}
+		I2C1->ICR |= I2C_ICR_STOPCF;
+	}
+}
+
+void bno055_power_management(unsigned char mode)
+{
+	i2c1_write(SLAVE_ADDRESS,0x3E,&mode,1);  
+	delay_ms(10);
+}
+
+void bno055_operation_management(unsigned char mode)
+{
+	i2c1_write(SLAVE_ADDRESS,0x3D,&mode,1); 
+	delay_ms(20);
+}
+
+void bno055_read_single_byte(uint8_t address,unsigned char* data1)
+{
+	i2c1_read(SLAVE_ADDRESS, address, data1,1);
+}
+
+void bno055_read_multiple_bytes(uint8_t address,unsigned char* data1, uint8_t len)
+{
+		i2c1_read(SLAVE_ADDRESS, address, data1,len);
+}
+
+void bno055_write_single_byte(uint8_t address,unsigned char data)
+{
+	//0x3D
+	i2c1_write(SLAVE_ADDRESS,address,&data,1);
+}
+
+void bno055_init(void)
+{
+	bno055_set_page_id(0x00);
+	bno055_sys_trigger(0x20);
+	delay_ms(700);
+	bno055_power_management(0x00);
+	bno055_operation_management(0x00);
+	bno055_sys_trigger(0x80);
+	delay_ms(700);
+}
+
+void bno055_set_page_id(unsigned char page)
+{
+	//0x01 or 0x00
+	i2c1_write(SLAVE_ADDRESS,0x07,&page,1);
+	delay_ms(5);
+}
+
+void bno055_sys_trigger(unsigned char test)
+{
+	//0x20 - reset
+	//0x80 - use external oscillator
+	//0x01 - self test
+	i2c1_write(SLAVE_ADDRESS,0x3F,&test,1);
+}
+
+void bno055_check_calibration(unsigned char* data1)
+{
+	bno055_read_single_byte(0x35,data1);
+	while(data1[0]!=0xFF)
+	{
+		uart_SendChar(data1[0]);
+		delay_ms(50);
+		bno055_read_single_byte(0x35,data1);
+	}
+	uart_SendChar(data1[0]);
+}	
+
+void bno055_get_raw_mag(void)
+{
+	unsigned char buffer[6],bufferx[12];
+	bno055_read_multiple_bytes(0x0E,buffer,6);
+	int16_t magx=0x00;
+	int16_t magy=0x00;
+	int16_t magz=0x00;
+	magx |= buffer[1];
+	magx = (magx<<8) | buffer[0];
+	magx/=16;
+	magy |= buffer[3];
+	magy = (magy<<8) | buffer[2];
+	magy/=16;
+	magz |= buffer[5];
+	magz = (magz<<8) | buffer[4];
+	magz/=16;
+	
+	sprintf(bufferx,"%d\n\r",magx);
+	uart_SendString("magX:");
+	uart_SendString(bufferx);
+	memset(bufferx,0,12);
+	sprintf(bufferx,"%d\n\r",magy);
+	uart_SendString("magY:");
+	uart_SendString(bufferx);
+	memset(bufferx,0,12);
+	sprintf(bufferx,"%d\n\r",magz);
+	uart_SendString("magZ:");
+	uart_SendString(bufferx);
+	memset(buffer,0,12);
+}
+
+void bno055_get_raw_acc(void)
+{
+	unsigned char buffer[6],bufferx[12];
+	bno055_read_multiple_bytes(0x08,buffer,6);
+	int16_t accx=0x00;
+	int16_t accy=0x00;
+	int16_t accz=0x00;
+	accx |= buffer[1];
+	accx = (accx<<8) | buffer[0];
+	accx/=16;
+	accy |= buffer[3];
+	accy = (accy<<8) | buffer[2];
+	accy/=16;
+	accz |= buffer[5];
+	accz = (accz<<8) | buffer[4];
+	accz/=16;
+	
+	sprintf(bufferx,"%d\n\r",accx);
+	uart_SendString("accX:");
+	uart_SendString(bufferx);
+	memset(bufferx,0,12);
+	sprintf(bufferx,"%d\n\r",accy);
+	uart_SendString("accY:");
+	uart_SendString(bufferx);
+	memset(bufferx,0,12);
+	sprintf(bufferx,"%d\n\r",accz);
+	uart_SendString("accZ:");
+	uart_SendString(bufferx);
+	memset(buffer,0,12);
+}
+
+void bno055_get_raw_gyro(void)
+{
+	unsigned char buffer[6],bufferx[12];
+	bno055_read_multiple_bytes(0x14,buffer,6);
+	int16_t gyrox=0x00;
+	int16_t gyroy=0x00;
+	int16_t gyroz=0x00;
+	gyrox |= buffer[1];
+	gyrox = (gyrox<<8) | buffer[0];
+	gyrox/=16;
+	gyroy |= buffer[3];
+	gyroy = (gyroy<<8) | buffer[2];
+	gyroy/=16;
+	gyroz |= buffer[5];
+	gyroz = (gyroz<<8) | buffer[4];
+	gyroz/=16;
+	
+	sprintf(bufferx,"%d\n\r",gyrox);
+	uart_SendString("gyroX:");
+	uart_SendString(bufferx);
+	memset(bufferx,0,12);
+	sprintf(bufferx,"%d\n\r",gyroy);
+	uart_SendString("gyroY:");
+	uart_SendString(bufferx);
+	memset(bufferx,0,12);
+	sprintf(bufferx,"%d\n\r",gyroz);
+	uart_SendString("gyroZ:");
+	uart_SendString(bufferx);
+	memset(buffer,0,12);
+}
+
+void delay_ms(uint32_t ms)
+{
+	for(uint32_t i=0;i<ms*8000;i++)
+	{
+		__asm__("nop");
+	}
+}
+
+void tim2_init_us(void) {
+    RCC->APB1ENR |= RCC_APB1ENR_TIM2EN;  // Enable TIM2 clock
+    TIM2->PSC = 71;          // Prescaler: (72 MHz / (71 + 1)) = 1 MHz ? 1 tick = 1 µs
+    TIM2->ARR = 0xFFFFFFFF;  // Max auto-reload
+    TIM2->CR1 |= TIM_CR1_CEN; // Enable counter
+}
+
+uint32_t get_current_time_us(void) {
+    return TIM2->CNT;  // Reads current counter value in microseconds
+}
+
+int pid(double current_pitch, double kp, double ki, double kd)
+{
+	static double setpoint_pitch=0.0, prev_error=0.0, integral=0.0;
+	static uint32_t prev_time = 0;
+	
+	int current_time= (int)get_current_time_us();
+	double elapsed_time=(current_time-prev_time)/1000000.0;
+	
+	double error=setpoint_pitch-current_pitch;
+	integral+=error*elapsed_time;
+	double derivative = (error-prev_error)/elapsed_time;
+	
+	double output = kp*error+ki*integral+kd*derivative;
+	prev_error=error;
+	prev_time=current_time;
+	
+	int pwm=(int)output;
+	pwm=constrain(pwm,1000,2000);
+	
+	return pwm;
+}
+
+double get_pitch(void)
+{
+	unsigned char data11[2],bufferx[12];
+	bno055_read_multiple_bytes(0x1E,data11,2);
+	int16_t eulerz=0x00;
+	eulerz |= data11[1];
+	eulerz = (eulerz<<8) | data11[0];
+  eulerz=eulerz / 16;
+	
+	sprintf(bufferx,"%d\n\r",eulerz);
+	uart_SendString("eulerz:");
+	uart_SendString(bufferx);
+	memset(bufferx,0,12);
+	return eulerz;  // convert to degrees
+}
+
+int constrain(int val, int min, int max) 
+{
+    if (val < min) return min;
+    if (val > max) return max;
+    return val;
+}
+
+int main(void)
+{
+	unsigned char data1[100];
+	uart_init();
+	i2c_gpio_init();
+	gpio_led_init();
+	i2c_init();
+	bno055_init();
+	tim2_init_us();
+	bno055_operation_management(0x0C);
+	//bno055_check_calibration(data1);
+	while(1)
+	{
+		//Get Euler Pitch Angle
+		double current_pitch=get_pitch();
+		
+		//Apply PID Algo
+		int pitch=pid(current_pitch, 0.0, 0.0, 0.0);
+		
+		//Apply Motor Mixing Algo
+		int motor1=1500+pitch;
+		int motor2=1500-pitch;
+	}
+}
+

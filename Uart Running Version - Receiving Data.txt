@@ -1,0 +1,83 @@
+#include "stm32f303xc.h"
+#include <stdint.h>
+
+void uart_SendString (char *string);
+void uart_SendChar (char c);
+void uart_init (void);
+void delay(void);
+char uart_ReceiveChar (void);
+
+void uart_init (void)
+{
+	/* 1. Enable the UART CLOCK and GPIO CLOCK */
+	RCC->AHBENR |= RCC_AHBENR_GPIOAEN; /* Enable GPIOA CLOCK */
+	RCC->APB1ENR |= RCC_APB1ENR_USART2EN;  /* Enable UART2 CLOCK */
+	
+	/* 2. Configure the UART PINs for ALternate Functions */
+	GPIOA->MODER &= ~(3U << (2 * 2));   // Clear mode bits
+	GPIOA->MODER |= (2U << (2 * 2));  /* Bits (5:4)= 1:0 --> Alternate Function for Pin PA2 */
+	GPIOA->MODER |= (2<<6);  /* Bits (7:6)= 1:0 --> Alternate Function for Pin PA3 */
+	
+	GPIOA->AFR[0] |= (7U << (4 * 2));  /* Bytes (11:10:9:8) = 0:1:1:1  --> AF7 Alternate function for USART2 at Pin PA2 */
+	GPIOA->AFR[0] |= (7<<12); /* Bytes (15:14:13:12) = 0:1:1:1  --> AF7 Alternate function for USART2 at Pin PA3 */
+	
+	/* 3. Configure the Output Speed Register */
+	//GPIOA->OSPEEDR |= (3<<4) | (3<<6);  /* Bits (5:4)= 1:1 and Bits (7:6)= 1:1 --> High Speed for PIN PA2 and PA3 */
+	
+	//USART2->CR1 &= ~USART_CR1_UE;  /* Disable USART before configuration */
+	
+	/* 4. Program the M bit in USART_CR1 to define the word length. */
+	//USART2->CR1 &= ~(1 << 28);     /* M1 = 0 */
+	//USART2->CR1 &= ~(1 << 12);     /* M0 = 0 (8-bit word length) */
+	
+	/* 5. Select the desired baud rate using the USART_BRR register. */
+	USART2->BRR = 8000000 / 9600; /* Assuming 8MHz PCLK1, set Baud Rate to 9600 */
+	
+	/* 6. Program the number of stop bits in USART_CR2. */
+	//USART2->CR2 &= ~(3 << 12);     /* STOP[13:12] = 00 (1 stop bit) */
+	
+	USART2->CR1 |= USART_CR1_TE;   /* Enable USART */
+	USART2->CR1 |= USART_CR1_RE;   /* Enable USART */
+
+	/* 7. Enable the Transmitter by Setting the TE bit in USART_CR1 Register */
+	USART2->CR1 |= USART_CR1_UE;  /* TE=1.. Enable Transmitter */
+	
+	while (!(USART2->ISR & USART_ISR_TEACK)); /* Wait until USART2 is ready. */
+	
+}
+
+void uart_SendChar (char c)
+{
+	while (!(USART2->ISR & USART_ISR_TXE));/* Wait for TC to SET.. This indicates that the data has been transmitted */
+	USART2->TDR = c; /* load the data into TDR register */
+}
+	
+void uart_SendString (char *string)
+{
+	while (*string) uart_SendChar (*string++);
+}
+
+void delay(void)
+{
+	for(int i=0;i<50000;i++);
+}
+
+char uart_ReceiveChar(void)
+{
+  while (!(USART2->ISR & USART_ISR_RXNE));  // Wait until RXNE (Read data register not empty)
+  char c=USART2->RDR;	
+	return c;
+}
+
+int main (void)
+{
+	uart_init ();
+	
+	while (1)
+	{
+		char u=uart_ReceiveChar();
+		uart_SendChar(u);
+	}
+}
+
+
